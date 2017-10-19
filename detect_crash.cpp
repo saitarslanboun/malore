@@ -14,7 +14,7 @@ using namespace cv;
 
 namespace fs = boost::filesystem;
 
-int	frames2skip, frameDiffGaussMask, damageDetectMaskSize, frameDmgDialMask, surfHessianThs, minNrOfTrackedFeatures, minNrOfAcceptedFeatures, featurePointDistClusterThs,
+int	frames2skip, frameDiffGaussMask, damageDetectMaskSize, frameDmgDialMask, fastHessianThs, minNrOfTrackedFeatures, minNrOfAcceptedFeatures, featurePointDistClusterThs,
 	ransacProjThreshold, ransacProjThs_1_to, try2MergeXclusters, try2MergeBeforeAfterSteps, try2MergeChangeBase;
 
 float	frameDiffAvg, frameDiffThs, windowHorizontal, windowVertical, damageSensitivity, verificationLevels, verifDamageMaskDilate, featurePointDistThs, 
@@ -100,7 +100,6 @@ void find_damage_mask(Mat currentFrame, int frame_height, int frame_width, int m
 		stop:;
 	}
 
-	//cout << dmgSum << endl;
 	if (frameDmgDialMask > 0) dilate(dmgMaskDamage, dmgMaskDamage, frameDmgDialMaskElement);
 }
 
@@ -115,8 +114,7 @@ void find_the_features(Mat previousFrame, int minRow, int maxRow, int minCol, in
 	split(img_objectHSV1, chHSVout);
 	Mat img_frame1 = chHSVout[2].clone();
 	equalizeHist(img_frame1, img_frame1);
-	FastFeatureDetector detector(20);
-	//SurfFeatureDetector detector(surfHessianThs, 2, 2);
+	FastFeatureDetector detector(fastHessianThs);
 	vector<KeyPoint> keypoints_frame1, keypoints_frame11;
 	detector.detect(img_frame1, keypoints_frame1);
 
@@ -134,6 +132,7 @@ void find_the_features(Mat previousFrame, int minRow, int maxRow, int minCol, in
 	extractor.compute(img_frame1, keypoints_frame11, descriptors_frame1);
 	Tform = Mat::eye(3, 3, CV_64F);
 	InvTform = Mat::eye(3, 3, CV_64F);
+
 	// current frame
 	Mat img_objectRGB2 = currentFrame.clone();
 	Mat img_objectHSV2;
@@ -211,10 +210,13 @@ void process_video(cv::VideoCapture capVideo, fs::path full_path, fs::path video
 	if (frames2skip < 1) frames2skip = 1;
 	int numberOfFrames = capVideo.get(CV_CAP_PROP_FRAME_COUNT);
 	int noFrame = 1;
-	Mat previousFrame;
-        capVideo.read(previousFrame);
-	Mat currentFrame;
-        currentFrame = previousFrame.clone();
+	vector<Mat> frameHeap;
+	Mat previousFrame, currentFrame;
+	frameHeap.push_back(previousFrame);
+	frameHeap.push_back(currentFrame);
+	capVideo.read(frameHeap[0]);
+	frameHeap[1] = frameHeap[0].clone();
+
 	// keep_frame values
 	int stopAt = 1;
 	float max_pix_avg = 0;
@@ -264,26 +266,25 @@ void process_video(cv::VideoCapture capVideo, fs::path full_path, fs::path video
 
 	while (noFrame < numberOfFrames)
 	{
-		//cout << noFrame << endl;
 		if ((noFrame-1) % frames2skip != 0)
                 {
                 	noFrame++;
-                        capVideo.read(currentFrame);
+                        capVideo.read(frameHeap[1]);
                         continue;
                 }
-		if (keep_frame(previousFrame, currentFrame, max_pix, stopAt, max_pix_fin, max_pix_avg))
+		if (keep_frame(frameHeap[0], frameHeap[1], max_pix, stopAt, max_pix_fin, max_pix_avg))
 		{
 			Mat dmgMaskDamage(frame_height, frame_width, CV_8U, Scalar::all(0));
-			find_damage_mask(currentFrame, frame_height, frame_width, maxCol, minCol, CD1, CD2, minRow, maxRow, 
+			find_damage_mask(frameHeap[1], frame_height, frame_width, maxCol, minCol, CD1, CD2, minRow, maxRow, 
 						frameDmgDialMaskElement, dmgMaskDamage, dmgMaskSum);
 			Mat Tform, InvTform;
 			vector<DMatch> matches;
-			find_the_features(previousFrame, minRow, maxRow, minCol, maxCol, Tform, InvTform, currentFrame, maxDiststance, matches);
-			//capVideoGood.write(currentFrame);
+			find_the_features(frameHeap[0], minRow, maxRow, minCol, maxCol, Tform, InvTform, frameHeap[1], 
+						maxDiststance, matches);
+			//capVideoGood.write(frameHeap[1]);
 		}
-		Mat previousFrame;
-		previousFrame = currentFrame.clone();
-		capVideo.read(currentFrame);
+		frameHeap[0] = frameHeap[1].clone();
+		capVideo.read(frameHeap[1]);
 		noFrame++;
 	}
 
@@ -322,7 +323,6 @@ int main(int argc, char* argv[])
         string timestamp = std::to_string(sec.count());
 
 	// Parameters are given by the user as arguments. All parameters have default value.
-
 	options_description desc("Allowed options");
 	desc.add_options()
 	("frames2skip", value<int>(&frames2skip)->default_value(2))
@@ -336,7 +336,7 @@ int main(int argc, char* argv[])
 	("damageDetectMaskSize", value<int>(&damageDetectMaskSize)->default_value(5))
 	("verificationLevels", value<float>(&verificationLevels)->default_value(3.0))
 	("verifDamageMaskDilate", value<float>(&verifDamageMaskDilate)->default_value(1.0))
-	("surfHessianThs", value<int>(&surfHessianThs)->default_value(100))
+	("fastHessianThs", value<int>(&fastHessianThs)->default_value(10))
 	("featurePointDistThs", value<float>(&featurePointDistThs)->default_value(0.25))
 	("minNrOfTrackedFeatures", value<int>(&minNrOfTrackedFeatures)->default_value(5))
 	("minNrOfAcceptedFeatures", value<int>(&minNrOfAcceptedFeatures)->default_value(10))
@@ -366,7 +366,7 @@ int main(int argc, char* argv[])
         damageSensitivity = opts["damageSensitivity"].as<float>();
 	damageDetectMaskSize = opts["damageDetectMaskSize"].as<int>();
 	frameDmgDialMask = opts["frameDmgDialMask"].as<int>();
-	surfHessianThs = opts["surfHessianThs"].as<int>();
+	fastHessianThs = opts["fastHessianThs"].as<int>();
 	featurePointDistThs = opts["featurePointDistThs"].as<float>();
 	minNrOfTrackedFeatures = opts["minNrOfTrackedFeatures"].as<int>();
 	minNrOfAcceptedFeatures = opts["minNrOfAcceptedFeatures"].as<int>();
